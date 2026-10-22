@@ -1,11 +1,13 @@
 - 我们在游玩《英灵神殿》的过程中会发现，中文字体有些奇怪，比如像“关”、“复”等汉字。
-# NotoSansJP-Regular
-![NotoSansJP-Regular](pic/font-preview-NotoSansJP-Regular.png)
-# NotoSansSC-Regular
-![NotoSansSC-Regular](pic/font-preview-NotoSansSC-Regular.png)
-##
 - 原因是TMP在渲染文本时，如果当前字体缺少某个字符，会按照回退字体顺序查找回退字体。如果此时日文字体排在中文字体前面，就会导致中文界面显示日文字形。通过调整字体回退顺序，把游戏内置的中文字体插到日文字体前面，先于日文字体加载就能解决这类问题。
+# 日文字体
+- NotoSansJP-Regular
+![NotoSansJP-Regular](pic/font-preview-NotoSansJP-Regular.png)
+# 中文字体
+- NotoSansSC-Regular
+![NotoSansSC-Regular](pic/font-preview-NotoSansSC-Regular.png)
+
 # Mod 所需前置
 |                                                 依赖项                                                  |      版本号      |
 | :-------------------------------------------------------------------------------------------------------: | :--------------: |
-|                                            BepInEx                                              |  ---  |
+|                                            BepInEx                                              |  5.4.2333  |
