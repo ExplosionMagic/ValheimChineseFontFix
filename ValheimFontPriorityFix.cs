@@ -7,6 +7,9 @@ using System.Linq;
 using System.Reflection;
 using TMPro;
 using UnityEngine;
+using UnityEngine.SceneManagement;
+using UnityEngine.UI;
+using Text = UnityEngine.UI.Text;
 
 namespace ValheimFontPriorityFix
 {
@@ -16,26 +19,42 @@ namespace ValheimFontPriorityFix
     {
         public const string PluginId = "dev.valheim-cn.font-priority-fix";
         public const string PluginName = "Valheim Chinese Font Priority Fix";
-        public const string PluginVersion = "0.1.4";
+        public const string PluginVersion = "0.2.6";
 
         private static FontPriorityFixPlugin _instance;
         private Harmony _harmony;
-        private bool _jotunnPatched;
+
+        internal static Font ChineseSansUiFont;
+        internal static Font ChineseSerifUiFont;
 
         private void Awake()
         {
             _instance = this;
             _harmony = new Harmony(PluginId);
+            _harmony.PatchAll(Assembly.GetExecutingAssembly());
+
+            SceneManager.sceneLoaded += OnSceneLoaded;
             StartCoroutine(InitialFix());
-            TryPatchJotunn();
         }
 
         private void OnDestroy()
         {
+            SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
         }
 
-        // ============ 修复入口 ============
+        private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+        {
+            StartCoroutine(DelayedApply());
+        }
+
+        private IEnumerator DelayedApply()
+        {
+            yield return null;
+            yield return null;
+            ApplyFallbackFixes();
+            ForceUpdateAllText();
+        }
 
         private IEnumerator InitialFix()
         {
@@ -48,143 +67,65 @@ namespace ValheimFontPriorityFix
             ForceUpdateAllText();
         }
 
-        private static IEnumerator DelayedReapply()
+        internal static void PickChineseUiFonts()
         {
-            yield return null;
-            yield return null;
-            _instance?.ApplyFallbackFixes();
-            _instance?.ForceUpdateAllText();
-            Debug.Log("[FontPriorityFix] Jotunn 初始化后已重新应用字体修复。");
-        }
+            if (ChineseSansUiFont != null && ChineseSerifUiFont != null) return;
 
-        // ============ Jotunn 时序补丁 ============
-
-        private void TryPatchJotunn()
-        {
-            if (_jotunnPatched) return;
-
-            Type jotunnMainType = AccessTools.TypeByName("Jotunn.Main");
-            if (jotunnMainType == null)
+            var fonts = Resources.FindObjectsOfTypeAll<Font>();
+            foreach (var f in fonts)
             {
-                Logger.LogInfo("未检测到 Jotunn，跳过时序补丁。");
-                return;
-            }
-
-            var awakeMethod = AccessTools.Method(jotunnMainType, "Awake");
-            if (awakeMethod == null)
-            {
-                Logger.LogWarning("未找到 Jotunn.Main.Awake 方法，跳过时序补丁。");
-                return;
-            }
-
-            try
-            {
-                var postfix = new HarmonyMethod(
-                    typeof(FontPriorityFixPlugin).GetMethod(
-                        nameof(AfterJotunnAwake),
-                        BindingFlags.Static | BindingFlags.NonPublic));
-
-                _harmony.Patch(awakeMethod, postfix: postfix);
-                _jotunnPatched = true;
-                Logger.LogInfo("已 Hook Jotunn.Main.Awake（Postfix）。");
-            }
-            catch (Exception e)
-            {
-                Logger.LogWarning($"Hook Jotunn.Main.Awake 失败：{e.Message}");
+                if (f == null) continue;
+                var n = f.name ?? "";
+                if (ChineseSansUiFont == null && n.IndexOf("NotoSansSC-Regular", StringComparison.OrdinalIgnoreCase) >= 0)
+                    ChineseSansUiFont = f;
+                if (ChineseSerifUiFont == null && n.IndexOf("NotoSerifSC-Regular", StringComparison.OrdinalIgnoreCase) >= 0)
+                    ChineseSerifUiFont = f;
             }
         }
 
-        private static void AfterJotunnAwake()
-        {
-            _instance?.StartCoroutine(DelayedReapply());
-        }
-
-        // ============ 核心修复逻辑 ============
+        // ============ TMP 回退优先级修复 ============
 
         private void ApplyFallbackFixes()
         {
             var allAssets = Resources.FindObjectsOfTypeAll<TMP_FontAsset>();
 
-            // 收集所有 SC 字体（全局池）
             var allScFonts = new List<TMP_FontAsset>();
             foreach (var f in allAssets)
             {
-                if (f != null && IsScFont(f.name) && !allScFonts.Contains(f))
-                    allScFonts.Add(f);
+                if (f == null) continue;
+                var n = f.name.Replace(" ", "");
+                if (n.IndexOf("NotoSansSC", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    n.IndexOf("NotoSerifSC", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!allScFonts.Contains(f)) allScFonts.Add(f);
+                }
             }
 
-            if (allScFonts.Count == 0)
-            {
-                Logger.LogWarning("未找到任何 SC 字体资产。");
-                return;
-            }
+            if (allScFonts.Count == 0) return;
 
-            Logger.LogInfo($"SC 字体池: {string.Join(", ", allScFonts.Select(f => f.name))}");
-
-            // ---- 全局回退列表 ----
             var globalList = TMP_Settings.fallbackFontAssets;
-            if (globalList != null)
-            {
-                bool changed = ReorderList(globalList, allScFonts);
-                Logger.LogInfo(
-                    $"全局回退列表{(changed ? "（已重排）" : "（无变化）")}: " +
-                    $"{string.Join(" -> ", globalList.Select(f => f?.name ?? "null"))}"
-                );
-            }
+            if (globalList != null) ReorderList(globalList, allScFonts);
 
-            // ---- 所有资产的本地回退列表 ----
             int fixedCount = 0;
             foreach (var asset in allAssets)
             {
                 if (asset == null) continue;
                 var localList = asset.fallbackFontAssetTable;
                 if (localList == null || localList.Count == 0) continue;
-
-                if (ReorderList(localList, allScFonts))
-                {
-                    fixedCount++;
-                    Logger.LogInfo(
-                        $"  修正本地回退: {asset.name} -> " +
-                        $"[{string.Join(", ", localList.Select(f => f?.name ?? "null"))}]"
-                    );
-                }
+                if (ReorderList(localList, allScFonts)) fixedCount++;
             }
-
-            Logger.LogInfo($"共调整 {fixedCount} 个资产的本地回退列表。");
         }
 
-        /// <summary>
-        /// 对回退列表做"SC 插到同字重 JP 之前"的重排，保留其余所有相对顺序。
-        ///
-        /// 规则示例：
-        ///   [SansJP-Regular]           → [SansSC-Regular, SansJP-Regular]
-        ///   [SansJP-Thin]              → [SansSC-Thin, SansJP-Thin]
-        ///   [SansJP-Regular, SansJP-Thin]
-        ///                             → [SansSC-Regular, SansJP-Regular, SansSC-Thin, SansJP-Thin]
-        ///   [SansSC-Regular, SansJP-Regular]
-        ///                             → 不变（顺序已正确）
-        ///   [SerifJP-Regular]          → [SerifSC-Regular, SerifJP-Regular]
-        ///   [SomeOtherFont]            → 不变（无 JP）
-        ///
-        /// 返回值：是否发生了变更。
-        /// </summary>
         private static bool ReorderList(List<TMP_FontAsset> list, List<TMP_FontAsset> allScFonts)
         {
             if (list == null || list.Count == 0) return false;
-
             var newList = new List<TMP_FontAsset>(list.Count + 4);
             var added = new HashSet<TMP_FontAsset>();
             bool changed = false;
 
             foreach (var f in list)
             {
-                if (f == null)
-                {
-                    newList.Add(null);
-                    continue;
-                }
-
-                // 遇到 JP：先插入对应字重/家族的 SC（若尚未加入）
+                if (f == null) { newList.Add(null); continue; }
                 if (IsJpFont(f.name))
                 {
                     var matchSc = FindMatchingSc(f.name, allScFonts);
@@ -192,81 +133,40 @@ namespace ValheimFontPriorityFix
                     {
                         newList.Add(matchSc);
                         added.Add(matchSc);
-                        changed = true; // 插入了新元素
+                        changed = true;
                     }
                 }
-
-                // 输出自身（已添加过则跳过 → 原列表有重复也会被清理）
-                if (!added.Contains(f))
-                {
-                    newList.Add(f);
-                    added.Add(f);
-                }
-                else
-                {
-                    changed = true; // 去掉了重复
-                }
+                if (!added.Contains(f)) { newList.Add(f); added.Add(f); }
+                else changed = true;
             }
 
             if (newList.Count != list.Count) changed = true;
-
-            if (changed)
-            {
-                list.Clear();
-                list.AddRange(newList);
-            }
+            if (changed) { list.Clear(); list.AddRange(newList); }
             return changed;
         }
 
-        /// <summary>
-        /// 根据 JP 字体的名字，从 SC 池里找到同家族、同字重的对应字体。
-        ///
-        /// 家族匹配：Sans ↔ Sans，Serif ↔ Serif
-        /// 字重匹配：Regular ↔ Regular，Thin ↔ Thin，Bold ↔ Bold
-        /// </summary>
         private static TMP_FontAsset FindMatchingSc(string jpName, List<TMP_FontAsset> scFonts)
         {
             if (string.IsNullOrEmpty(jpName)) return null;
             var jp = jpName.Replace(" ", "");
-
             bool isSans = jp.IndexOf("Sans", StringComparison.OrdinalIgnoreCase) >= 0;
             bool isSerif = jp.IndexOf("Serif", StringComparison.OrdinalIgnoreCase) >= 0;
             if (!isSans && !isSerif) return null;
 
-            // 提取字重关键词
             string weightKey = null;
             if (jp.IndexOf("Thin", StringComparison.OrdinalIgnoreCase) >= 0) weightKey = "Thin";
             else if (jp.IndexOf("Regular", StringComparison.OrdinalIgnoreCase) >= 0) weightKey = "Regular";
             else if (jp.IndexOf("Bold", StringComparison.OrdinalIgnoreCase) >= 0) weightKey = "Bold";
-            else if (jp.IndexOf("Light", StringComparison.OrdinalIgnoreCase) >= 0) weightKey = "Light";
 
-            // 家族关键词（对应 SC 的家族名）
             string familyKey = isSans ? "SansSC" : "SerifSC";
-
             foreach (var sc in scFonts)
             {
                 if (sc == null) continue;
                 var n = sc.name.Replace(" ", "");
-
-                // 家族匹配
                 if (n.IndexOf(familyKey, StringComparison.OrdinalIgnoreCase) < 0) continue;
-
-                // 字重匹配
-                if (weightKey != null && n.IndexOf(weightKey, StringComparison.OrdinalIgnoreCase) >= 0)
-                    return sc;
+                if (weightKey != null && n.IndexOf(weightKey, StringComparison.OrdinalIgnoreCase) >= 0) return sc;
             }
-
             return null;
-        }
-
-        // ============ 字体判定辅助 ============
-
-        private static bool IsScFont(string name)
-        {
-            if (string.IsNullOrEmpty(name)) return false;
-            var n = name.Replace(" ", "");
-            return n.IndexOf("NotoSansSC", StringComparison.OrdinalIgnoreCase) >= 0
-                || n.IndexOf("NotoSerifSC", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static bool IsJpFont(string name)
@@ -277,28 +177,151 @@ namespace ValheimFontPriorityFix
                 || n.IndexOf("NotoSerifJP", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        // ============ 缓存清理 + 强制刷新 ============
-
         private void ForceUpdateAllText()
         {
-            try
-            {
-                TMP_ResourceManager.ClearFontAssetGlyphCache();
-            }
-            catch (Exception e)
-            {
-                Logger.LogWarning($"清除字形缓存失败：{e.Message}");
-            }
+            try { TMP_ResourceManager.ClearFontAssetGlyphCache(); } catch { }
 
-            int refreshed = 0;
             foreach (var text in Resources.FindObjectsOfTypeAll<TMP_Text>())
             {
                 if (text == null) continue;
                 text.SetAllDirty();
                 text.ForceMeshUpdate();
-                refreshed++;
             }
-            Logger.LogInfo($"已清除字形缓存并强制刷新 {refreshed} 个 TMP_Text。");
+        }
+    }
+
+    // ============ Harmony Patch: 截获 Jotunn 的初始化，从源头替换字体 ============
+
+    [HarmonyPatch]
+    internal static class JotunnInitPatch
+    {
+        static MethodBase TargetMethod()
+        {
+            var type = AccessTools.TypeByName("Jotunn.Managers.GUIManager");
+            return type == null ? null : AccessTools.Method(type, "InitializeAssets");
+        }
+
+        static void Postfix()
+        {
+            FontPriorityFixPlugin.PickChineseUiFonts();
+            if (FontPriorityFixPlugin.ChineseSerifUiFont == null) return;
+
+            Type guiManagerType = AccessTools.TypeByName("Jotunn.Managers.GUIManager");
+            if (guiManagerType == null) return;
+
+            var instanceProp = guiManagerType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceProp?.GetValue(null);
+            if (instance == null) return;
+
+            string[] serifFields = { "<AveriaSerif>k__BackingField", "<AveriaSerifBold>k__BackingField" };
+            string[] sansFields = { "<AveriaSans>k__BackingField", "<AveriaSansBold>k__BackingField" };
+
+            foreach (var fieldName in serifFields)
+            {
+                var field = guiManagerType.GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+                if (field != null)
+                    field.SetValue(instance, FontPriorityFixPlugin.ChineseSerifUiFont);
+            }
+            foreach (var fieldName in sansFields)
+            {
+                var field = guiManagerType.GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+                if (field != null && FontPriorityFixPlugin.ChineseSansUiFont != null)
+                    field.SetValue(instance, FontPriorityFixPlugin.ChineseSansUiFont);
+            }
+        }
+    }
+
+    // ============ Harmony Patch: 修复 InputField 排版溢出 ============
+
+    [HarmonyPatch]
+    internal static class JotunnCreateInputFieldPatch
+    {
+        static MethodBase TargetMethod()
+        {
+            var type = AccessTools.TypeByName("Jotunn.Managers.GUIManager");
+            return type == null ? null : AccessTools.Method(type, "CreateInputField");
+        }
+
+        static void Postfix(ref GameObject __result)
+        {
+            if (__result == null) return;
+            FontPriorityFixPlugin.PickChineseUiFonts();
+            var font = FontPriorityFixPlugin.ChineseSerifUiFont;
+            if (font == null) return;
+
+            var input = __result.GetComponent<InputField>();
+            if (input != null)
+            {
+                if (input.textComponent != null)
+                {
+                    var t = input.textComponent;
+                    t.font = font;
+                    t.color = Color.white;
+                    t.alignment = TextAnchor.MiddleLeft;
+                    t.horizontalOverflow = HorizontalWrapMode.Overflow;
+                    t.verticalOverflow = VerticalWrapMode.Overflow;
+                    t.raycastTarget = false; // 确保不阻挡点击
+                    t.SetAllDirty();
+
+                    // 强制重置其尺寸，防止被裁剪
+                    var rt = t.GetComponent<RectTransform>();
+                    rt.anchorMin = Vector2.zero;
+                    rt.anchorMax = Vector2.one;
+                    rt.offsetMin = new Vector2(5f, 0f);
+                    rt.offsetMax = new Vector2(-5f, 0f);
+                }
+
+                if (input.placeholder is Text p)
+                {
+                    p.font = font;
+                    p.color = new Color(0.6f, 0.6f, 0.6f, 1f); // 灰色占位符
+                    p.alignment = TextAnchor.MiddleLeft;
+                    p.horizontalOverflow = HorizontalWrapMode.Overflow;
+                    p.verticalOverflow = VerticalWrapMode.Overflow;
+                    p.SetAllDirty();
+
+                    var rt = p.GetComponent<RectTransform>();
+                    rt.anchorMin = Vector2.zero;
+                    rt.anchorMax = Vector2.one;
+                    rt.offsetMin = new Vector2(5f, 0f);
+                    rt.offsetMax = new Vector2(-5f, 0f);
+                }
+
+                // 强制刷新 InputField 内部状态
+                input.ForceLabelUpdate();
+            }
+        }
+    }
+
+    // ============ Harmony Patch: UI.Text 兜底 ============
+
+    [HarmonyPatch(typeof(Text), "set_font")]
+    internal static class AveriaTextFontPatch
+    {
+        static void Prefix(Text __instance, ref Font value)
+        {
+            if (value == null || __instance == null) return;
+
+            // 输入框内部的 Text 跳过，由 JotunnCreateInputFieldPatch 专门处理
+            if (__instance.GetComponentInParent<InputField>() != null) return;
+
+            var name = value.name ?? "";
+            if (name.IndexOf("AveriaSerif", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("AveriaSans", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                FontPriorityFixPlugin.PickChineseUiFonts();
+
+                if (name.IndexOf("AveriaSerif", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (FontPriorityFixPlugin.ChineseSerifUiFont != null)
+                        value = FontPriorityFixPlugin.ChineseSerifUiFont;
+                }
+                else
+                {
+                    if (FontPriorityFixPlugin.ChineseSansUiFont != null)
+                        value = FontPriorityFixPlugin.ChineseSansUiFont;
+                }
+            }
         }
     }
 }
