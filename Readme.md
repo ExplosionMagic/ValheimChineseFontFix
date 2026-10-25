@@ -11,6 +11,10 @@
 - NotoSansSC-Regular
 ![NotoSansSC-Regular](pic/font-preview-NotoSansSC-Regular.png)
 
+# Build Requirements
+- Visual Studio 2022 or newer
+- .NET 4.8 SDK
+
 # Mod 所需前置
 |                                                 依赖项                                                  |      版本号      |
 | :-------------------------------------------------------------------------------------------------------: | :--------------: |
